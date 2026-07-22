@@ -1,0 +1,231 @@
+name: ai-platform
+
+x-agent-env: &agent-env
+  APP_ENV: ${APP_ENV:-production}
+  TIMEZONE: ${TIMEZONE:-Asia/Shanghai}
+  DATA_DIR: /data
+  CONFIG_DIR: /config
+  LOG_DIR: /logs
+  POSTGRES_URL: ${POSTGRES_URL}
+  REDIS_URL: ${REDIS_URL}
+  CHROMA_URL: ${CHROMA_URL}
+  AGENT_CORE_URL: http://agent-core:8080
+
+services:
+  gateway:
+    image: caddy:2-alpine
+    ports: ["8088:80"]
+    volumes: [./Caddyfile:/etc/caddy/Caddyfile:ro]
+    depends_on: [agent-core, paper-agent, planner-agent, rag-service]
+    restart: always
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ai_platform}
+      POSTGRES_USER: ${POSTGRES_USER:-ai_platform}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: always
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: always
+
+  chromadb:
+    image: chromadb/chroma:latest
+    volumes: [chroma_data:/chroma/chroma]
+    restart: always
+
+  agent-core:
+    build: ./services/agent-core
+    env_file: ${PLATFORM_ENV_FILE:-.env}
+    environment:
+      AGENTS_CONFIG: /config/agents.yaml
+    volumes: [./config:/config:ro]
+    expose: ["8080"]
+    restart: always
+
+  memory-service:
+    build: ./services/memory-service
+    env_file: ${PLATFORM_ENV_FILE:-.env}
+    depends_on:
+      postgres: {condition: service_healthy}
+    expose: ["8081"]
+    restart: always
+
+  notification-service:
+    build: ./services/notification-service
+    env_file:
+      - ${PLATFORM_ENV_FILE:-.env}
+      - ${FINANCE_ENV_FILE:-./env/finance.env}
+    expose: ["8083"]
+    restart: always
+
+  knowledge-sync:
+    build: ./services/knowledge-sync
+    env_file: ${PLATFORM_ENV_FILE:-.env}
+    environment:
+      KNOWLEDGE_DIR: /knowledge
+    volumes: [knowledge_data:/knowledge]
+    expose: ["8084"]
+    restart: always
+
+  workspace-agent:
+    build:
+      context: ${WORKSPACE_AGENT_PATH:-../ai_workspace}
+      dockerfile: Dockerfile.workspace
+    env_file:
+      - ${PLATFORM_ENV_FILE:-.env}
+      - ${WORKSPACE_ENV_FILE:-./env/workspace.env}
+    environment:
+      <<: *agent-env
+      WORKSPACE_ROOT: /data/workspace
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: 8000
+      AI_PLATFORM_LLM_URL: http://agent-core:8080/v1/generate
+      EMBED_PROVIDER: ${EMBED_PROVIDER:-openai}
+      EMBED_MODEL: ${EMBED_MODEL:-text-embedding-3-small}
+    volumes: [workspace_data:/data]
+    expose: ["8001"]
+    depends_on: [chromadb, agent-core]
+    restart: always
+
+  astrbot:
+    build:
+      context: ${WORKSPACE_AGENT_PATH:-../ai_workspace}
+      dockerfile: Dockerfile.astrbot
+    env_file:
+      - ${PLATFORM_ENV_FILE:-.env}
+      - ${ASTRBOT_ENV_FILE:-./env/astrbot.env}
+    environment:
+      AI_WORKSPACE_API_BASE: http://workspace-agent:8001
+      PAPER_RADAR_API_BASE: http://paper-agent:8010
+      PLANNER_API_BASE: http://planner-agent:8000
+      FINANCE_API_BASE: http://finance-agent:8020
+      PLATFORM_SCHEDULER_ENABLED: "1"
+    volumes: [astrbot_data:/AstrBot/data]
+    ports: ["6185:6185"]
+    depends_on: [workspace-agent, paper-agent, planner-agent]
+    restart: always
+
+  paper-agent:
+    build: ${PAPER_AGENT_PATH:-../paper_radar_agent}
+    env_file:
+      - ${PLATFORM_ENV_FILE:-.env}
+      - ${PAPER_ENV_FILE:-./env/paper.env}
+    environment:
+      <<: *agent-env
+      PAPER_RADAR_DATA_DIR: /data/papers
+      PAPER_RADAR_NOTES_DIR: /data/notes
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: 8000
+      AGENT_CORE_URL: http://agent-core:8080
+      KNOWLEDGE_SYNC_URL: http://knowledge-sync:8084
+    volumes: [paper_data:/data]
+    expose: ["8010"]
+    depends_on: [chromadb, agent-core]
+    restart: always
+
+  planner-agent:
+    build: ${PLANNER_AGENT_PATH:-../daily_planner_agent}
+    env_file:
+      - ${PLATFORM_ENV_FILE:-.env}
+      - ${PLANNER_ENV_FILE:-./env/planner.env}
+    environment:
+      <<: *agent-env
+      HOST: 0.0.0.0
+      PORT: 8000
+      PLANNER_DATABASE_URL: ${POSTGRES_URL}
+      AGENT_CORE_URL: http://agent-core:8080
+      SQLITE_PATH: /data/daily_planner.db
+    volumes: [planner_data:/data]
+    expose: ["8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: always
+
+  finance-agent:
+    profiles: ["finance"]
+    build: ${FINANCE_AGENT_PATH:-../stock-data-analyzer}
+    env_file:
+      - ${PLATFORM_ENV_FILE:-.env}
+      - ${FINANCE_ENV_FILE:-./env/finance.env}
+    environment:
+      <<: *agent-env
+      GOLD_AGENT_DB: /data/gold_agent.db
+      GOLD_AGENT_SQLITE_WAL: "1"
+      GOLD_AGENT_RUN_FEISHU: "1"
+      GOLD_AGENT_RUN_LOCAL_SCHEDULERS: "0"
+      FINANCE_API_HOST: 0.0.0.0
+      FINANCE_API_PORT: 8020
+      NOTIFICATION_SERVICE_URL: http://notification-service:8083
+      KNOWLEDGE_SYNC_URL: http://knowledge-sync:8084
+      AI_PLATFORM_LLM_URL: http://agent-core:8080/v1/generate
+    volumes: [finance_data:/data]
+    expose: ["8020"]
+    depends_on: [agent-core, notification-service]
+    restart: always
+
+  finance-feishu:
+    profiles: ["finance", "native-finance-feishu"]
+    build: ${FINANCE_AGENT_PATH:-../stock-data-analyzer}
+    env_file:
+      - ${PLATFORM_ENV_FILE:-.env}
+      - ${FINANCE_ENV_FILE:-./env/finance.env}
+    command: ["gold-agent"]
+    environment:
+      <<: *agent-env
+      GOLD_AGENT_DB: /data/gold_agent.db
+      GOLD_AGENT_SQLITE_WAL: "1"
+      GOLD_AGENT_RUN_FEISHU: "1"
+      GOLD_AGENT_RUN_LOCAL_SCHEDULERS: "0"
+      NOTIFICATION_SERVICE_URL: http://notification-service:8083
+      AI_PLATFORM_LLM_URL: http://agent-core:8080/v1/generate
+    volumes: [finance_data:/data]
+    depends_on: [finance-agent]
+    restart: always
+
+  rag-service:
+    build: ./services/rag-service
+    environment:
+      CHROMA_URL: ${CHROMA_URL}
+      WORKSPACE_AGENT_URL: http://workspace-agent:8001
+    expose: ["8085"]
+    depends_on: [chromadb, workspace-agent]
+    restart: always
+
+  scheduler:
+    build: ./services/scheduler
+    environment:
+      TIMEZONE: ${TIMEZONE:-Asia/Shanghai}
+      JOBS_CONFIG: /config/jobs.yaml
+      REDIS_URL: ${REDIS_URL}
+      NOTIFICATION_SERVICE_URL: http://notification-service:8083
+    volumes: [./config:/config:ro]
+    expose: ["8082"]
+    depends_on: [paper-agent, planner-agent]
+    restart: always
+
+volumes:
+  postgres_data:
+  redis_data:
+  chroma_data:
+  workspace_data:
+  astrbot_data:
+  paper_data:
+  planner_data:
+  finance_data:
+  knowledge_data:

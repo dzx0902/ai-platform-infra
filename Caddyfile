@@ -1,0 +1,20 @@
+:80 {
+  handle_path /api/core/* {
+    reverse_proxy agent-core:8080
+  }
+  handle_path /api/paper/* {
+    reverse_proxy paper-agent:8010
+  }
+  handle_path /api/planner/* {
+    reverse_proxy planner-agent:8000
+  }
+  handle_path /api/finance/* {
+    reverse_proxy finance-agent:8020
+  }
+  handle_path /api/rag/* {
+    reverse_proxy rag-service:8085
+  }
+  respond /health 200 {
+    body "ok"
+  }
+}

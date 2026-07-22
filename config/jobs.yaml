@@ -1,0 +1,23 @@
+jobs:
+  paper_daily:
+    cron: "0 8 * * *"
+    method: POST
+    url: http://paper-agent:8010/api/paper/run
+    body: {"no_llm": false}
+    notify:
+      route: paper
+      field: message
+  planner_daily_review:
+    cron: "0 22 * * *"
+    method: POST
+    url: http://planner-agent:8000/api/v1/review
+    body: {}
+  finance_daily_report:
+    enabled: false
+    cron: "30 9 * * *"
+    method: POST
+    url: http://finance-agent:8020/api/finance/report/today
+    body: {}
+    notify:
+      route: finance
+      field: report

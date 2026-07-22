@@ -1,0 +1,13 @@
+agents:
+  workspace:
+    base_url: http://workspace-agent:8001
+    health_path: /health
+  paper:
+    base_url: http://paper-agent:8010
+    health_path: /health
+  planner:
+    base_url: http://planner-agent:8000
+    health_path: /api/v1/health
+  finance:
+    base_url: http://finance-agent:8020
+    health_path: /health
