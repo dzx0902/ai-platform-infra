@@ -128,6 +128,8 @@ services:
       - ${PAPER_ENV_FILE:-./env/paper.env}
     environment:
       <<: *agent-env
+      # Paper Radar bundles its source/topic YAML files inside its own image.
+      CONFIG_DIR: /app/config
       PAPER_RADAR_DATA_DIR: /data/papers
       PAPER_RADAR_NOTES_DIR: /data/notes
       CHROMA_HOST: chromadb
