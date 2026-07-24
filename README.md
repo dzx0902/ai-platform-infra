@@ -45,6 +45,20 @@ FEISHU_FINANCE_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/...
 
 The scheduler routes Paper Radar daily reports to `paper` and Finance daily reports to `finance`. Webhook bots push messages only; they do not replace the AstrBot command bot.
 
+Paper Radar's daily schedule is defined by `paper_daily` in `config/jobs.yaml` and defaults to 08:00 Asia/Shanghai. At runtime, the scheduler reads the template from `config/jobs.yaml` and writes user changes to the `scheduler_data` Docker volume, so Feishu schedule changes do not dirty the Git checkout.
+
+From the AstrBot Feishu bot:
+
+```text
+/paper_schedule
+/paper_schedule 08:00 --llm --limit 5
+/paper_schedule off
+/paper_schedule on
+/paper_schedule run
+```
+
+The `run` action triggers the same scheduler path as the daily cron job and sends the report through the Paper webhook route.
+
 The legacy Finance Agent long-connection bot is disabled by default. Only start it when a separate interactive Finance bot is intentionally needed:
 
 ```bash

@@ -4,6 +4,8 @@ import asyncio
 import os
 from datetime import datetime
 from pathlib import Path
+from tempfile import NamedTemporaryFile
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -15,11 +17,85 @@ from redis.asyncio import Redis
 TZ = ZoneInfo(os.getenv("TIMEZONE", "Asia/Shanghai"))
 last_run: dict[str, str] = {}
 redis_client: Redis | None = None
+config_lock = asyncio.Lock()
+
+
+def config_path() -> Path:
+    return Path(os.getenv("JOBS_CONFIG", "/config/jobs.yaml"))
+
+
+def load_config() -> dict[str, Any]:
+    source = config_path()
+    if not source.exists():
+        source = Path(os.getenv("JOBS_TEMPLATE", "/config/jobs.yaml"))
+    if not source.exists():
+        return {}
+    return yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+
+
+def save_config(config: dict[str, Any]) -> None:
+    target = config_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, delete=False) as handle:
+        yaml.safe_dump(config, handle, allow_unicode=True, sort_keys=False)
+        temporary = Path(handle.name)
+    temporary.replace(target)
 
 
 def jobs() -> dict:
-    source = Path(os.getenv("JOBS_CONFIG", "/config/jobs.yaml"))
-    return (yaml.safe_load(source.read_text(encoding="utf-8")) or {}).get("jobs", {})
+    return load_config().get("jobs", {})
+
+
+def job_summary(name: str, spec: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": name,
+        "enabled": spec.get("enabled", True),
+        "cron": spec.get("cron"),
+        "time": daily_time_from_cron(str(spec.get("cron", ""))),
+        "method": spec.get("method", "POST"),
+        "url": spec.get("url"),
+        "body": spec.get("body", {}),
+        "notify": spec.get("notify"),
+        "last_run": last_run.get(name),
+    }
+
+
+def daily_time_from_cron(cron: str) -> str | None:
+    parts = cron.split()
+    if len(parts) != 5:
+        return None
+    minute, hour, day, month, weekday = parts
+    if day != "*" or month != "*" or weekday != "*":
+        return None
+    if not minute.isdigit() or not hour.isdigit():
+        return None
+    minute_int = int(minute)
+    hour_int = int(hour)
+    if not (0 <= minute_int <= 59 and 0 <= hour_int <= 23):
+        return None
+    return f"{hour_int:02d}:{minute_int:02d}"
+
+
+def cron_from_daily_time(value: str) -> str:
+    try:
+        parsed = datetime.strptime(value, "%H:%M")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="time must use HH:MM, for example 08:00") from exc
+    return f"{parsed.minute} {parsed.hour} * * *"
+
+
+def merge_job_patch(spec: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(spec)
+    if "time" in patch:
+        updated["cron"] = cron_from_daily_time(str(patch["time"]))
+    if "enabled" in patch:
+        updated["enabled"] = bool(patch["enabled"])
+    if "body" in patch:
+        body = patch["body"]
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="body must be an object")
+        updated["body"] = body
+    return updated
 
 
 async def invoke(name: str, spec: dict) -> dict:
@@ -75,6 +151,32 @@ async def startup() -> None:
 @app.get("/health")
 def health() -> dict:
     return {"ok": True, "service": "scheduler", "jobs": list(jobs()), "last_run": last_run}
+
+
+@app.get("/v1/jobs")
+def list_jobs() -> dict:
+    return {"jobs": [job_summary(name, spec) for name, spec in jobs().items()]}
+
+
+@app.get("/v1/jobs/{name}")
+def get_job(name: str) -> dict:
+    spec = jobs().get(name)
+    if not spec:
+        raise HTTPException(status_code=404, detail="Unknown job")
+    return job_summary(name, spec)
+
+
+@app.patch("/v1/jobs/{name}")
+async def update_job(name: str, patch: dict[str, Any]) -> dict:
+    async with config_lock:
+        config = load_config()
+        configured_jobs = config.setdefault("jobs", {})
+        spec = configured_jobs.get(name)
+        if not spec:
+            raise HTTPException(status_code=404, detail="Unknown job")
+        configured_jobs[name] = merge_job_patch(spec, patch)
+        save_config(config)
+        return job_summary(name, configured_jobs[name])
 
 
 @app.post("/v1/jobs/{name}/run")

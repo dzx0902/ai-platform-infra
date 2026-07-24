@@ -115,10 +115,11 @@ services:
       PAPER_RADAR_API_BASE: http://paper-agent:8010
       PLANNER_API_BASE: http://planner-agent:8000
       FINANCE_API_BASE: http://finance-agent:8020
+      SCHEDULER_API_BASE: http://scheduler:8082
       PLATFORM_SCHEDULER_ENABLED: "1"
     volumes: [astrbot_data:/AstrBot/data]
     ports: ["6185:6185"]
-    depends_on: [workspace-agent, paper-agent, planner-agent]
+    depends_on: [workspace-agent, paper-agent, planner-agent, scheduler]
     restart: always
 
   paper-agent:
@@ -213,10 +214,13 @@ services:
     build: ./services/scheduler
     environment:
       TIMEZONE: ${TIMEZONE:-Asia/Shanghai}
-      JOBS_CONFIG: /config/jobs.yaml
+      JOBS_CONFIG: /data/jobs.yaml
+      JOBS_TEMPLATE: /config/jobs.yaml
       REDIS_URL: ${REDIS_URL}
       NOTIFICATION_SERVICE_URL: http://notification-service:8083
-    volumes: [./config:/config:ro]
+    volumes:
+      - ./config:/config:ro
+      - scheduler_data:/data
     expose: ["8082"]
     depends_on: [paper-agent, planner-agent]
     restart: always
@@ -231,3 +235,4 @@ volumes:
   planner_data:
   finance_data:
   knowledge_data:
+  scheduler_data:
