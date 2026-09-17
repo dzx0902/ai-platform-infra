@@ -16,10 +16,26 @@ class Notification(BaseModel):
 
 app = FastAPI(title="AI Platform Notification Service", version="1.0.0")
 
+WEBHOOK_NAMES = {
+    "paper": "FEISHU_PAPER_WEBHOOK_URL",
+    "finance": "FEISHU_FINANCE_WEBHOOK_URL",
+    "default": "FEISHU_WEBHOOK_URL",
+}
+
 
 @app.get("/health")
 def health() -> dict[str, bool]:
     return {"ok": True}
+
+
+@app.get("/v1/routes")
+def routes() -> dict:
+    return {
+        "routes": {
+            route: {"configured": bool(os.getenv(env_name, ""))}
+            for route, env_name in WEBHOOK_NAMES.items()
+        }
+    }
 
 
 @app.post("/v1/notifications")
@@ -27,12 +43,7 @@ async def notify(item: Notification) -> dict[str, bool]:
     if item.channel == "log":
         print(item.text, flush=True)
         return {"ok": True}
-    webhook_names = {
-        "paper": "FEISHU_PAPER_WEBHOOK_URL",
-        "finance": "FEISHU_FINANCE_WEBHOOK_URL",
-        "default": "FEISHU_WEBHOOK_URL",
-    }
-    webhook = os.getenv(webhook_names[item.route], "")
+    webhook = os.getenv(WEBHOOK_NAMES[item.route], "")
     if not webhook:
         raise HTTPException(status_code=503, detail=f"Webhook route is not configured: {item.route}")
     async with httpx.AsyncClient(timeout=20) as client:

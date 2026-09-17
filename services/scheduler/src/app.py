@@ -16,6 +16,7 @@ from redis.asyncio import Redis
 
 TZ = ZoneInfo(os.getenv("TIMEZONE", "Asia/Shanghai"))
 last_run: dict[str, str] = {}
+job_state: dict[str, dict[str, Any]] = {}
 redis_client: Redis | None = None
 config_lock = asyncio.Lock()
 
@@ -47,16 +48,23 @@ def jobs() -> dict:
 
 
 def job_summary(name: str, spec: dict[str, Any]) -> dict[str, Any]:
+    state = job_state.get(name, {})
     return {
         "name": name,
         "enabled": spec.get("enabled", True),
         "cron": spec.get("cron"),
         "time": daily_time_from_cron(str(spec.get("cron", ""))),
+        "timezone": TZ.key,
+        "next_run": next_run_from_cron(str(spec.get("cron", ""))),
         "method": spec.get("method", "POST"),
         "url": spec.get("url"),
         "body": spec.get("body", {}),
         "notify": spec.get("notify"),
         "last_run": last_run.get(name),
+        "last_attempt": state.get("last_attempt"),
+        "last_success": state.get("last_success"),
+        "last_error": state.get("last_error"),
+        "last_status": state.get("last_status", "never"),
     }
 
 
@@ -74,6 +82,13 @@ def daily_time_from_cron(cron: str) -> str | None:
     if not (0 <= minute_int <= 59 and 0 <= hour_int <= 23):
         return None
     return f"{hour_int:02d}:{minute_int:02d}"
+
+
+def next_run_from_cron(cron: str) -> str | None:
+    try:
+        return croniter(cron, datetime.now(TZ)).get_next(datetime).isoformat()
+    except Exception:
+        return None
 
 
 def cron_from_daily_time(value: str) -> str:
@@ -99,21 +114,53 @@ def merge_job_patch(spec: dict[str, Any], patch: dict[str, Any]) -> dict[str, An
 
 
 async def invoke(name: str, spec: dict) -> dict:
+    job_state[name] = {
+        **job_state.get(name, {}),
+        "last_attempt": datetime.now(TZ).isoformat(),
+        "last_status": "running",
+        "last_error": None,
+    }
+    print(f"scheduler job started name={name}", flush=True)
     async with httpx.AsyncClient(timeout=300) as client:
-        response = await client.request(spec.get("method", "POST"), spec["url"], json=spec.get("body", {}))
-        response.raise_for_status()
-        payload = response.json()
-        notify = spec.get("notify")
-        if notify:
-            text = str(payload.get(notify.get("field", "message"), "")).strip()
-            if text:
-                notification = await client.post(
-                    os.getenv("NOTIFICATION_SERVICE_URL", "http://notification-service:8083") + "/v1/notifications",
-                    json={"channel": "feishu_webhook", "route": notify["route"], "text": text},
-                )
-                notification.raise_for_status()
-    last_run[name] = datetime.now(TZ).isoformat()
-    return {"ok": True, "name": name, "status_code": response.status_code, "result": payload}
+        try:
+            response = await client.request(spec.get("method", "POST"), spec["url"], json=spec.get("body", {}))
+            response.raise_for_status()
+            payload = response.json()
+            notify = spec.get("notify")
+            notification_payload = None
+            if notify:
+                text = str(payload.get(notify.get("field", "message"), "")).strip()
+                if text:
+                    notification = await client.post(
+                        os.getenv("NOTIFICATION_SERVICE_URL", "http://notification-service:8083") + "/v1/notifications",
+                        json={"channel": "feishu_webhook", "route": notify["route"], "text": text},
+                    )
+                    notification.raise_for_status()
+                    notification_payload = notification.json()
+            finished_at = datetime.now(TZ).isoformat()
+            last_run[name] = finished_at
+            job_state[name] = {
+                **job_state.get(name, {}),
+                "last_success": finished_at,
+                "last_status": "success",
+                "last_error": None,
+            }
+            print(f"scheduler job succeeded name={name}", flush=True)
+            return {
+                "ok": True,
+                "name": name,
+                "status_code": response.status_code,
+                "notification": notification_payload,
+                "result": payload,
+            }
+        except Exception as exc:
+            job_state[name] = {
+                **job_state.get(name, {}),
+                "last_status": "failed",
+                "last_error": str(exc),
+            }
+            print(f"scheduler job failed name={name} error={exc}", flush=True)
+            raise
 
 
 async def worker() -> None:
@@ -145,12 +192,22 @@ app = FastAPI(title="AI Platform Scheduler", version="1.0.0")
 async def startup() -> None:
     global redis_client
     redis_client = Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
+    print(
+        f"scheduler started timezone={TZ.key} config={config_path()} jobs={list(jobs())}",
+        flush=True,
+    )
     asyncio.create_task(worker())
 
 
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True, "service": "scheduler", "jobs": list(jobs()), "last_run": last_run}
+    return {
+        "ok": True,
+        "service": "scheduler",
+        "timezone": TZ.key,
+        "now": datetime.now(TZ).isoformat(),
+        "jobs": [job_summary(name, spec) for name, spec in jobs().items()],
+    }
 
 
 @app.get("/v1/jobs")
@@ -164,6 +221,30 @@ def get_job(name: str) -> dict:
     if not spec:
         raise HTTPException(status_code=404, detail="Unknown job")
     return job_summary(name, spec)
+
+
+@app.get("/v1/jobs/{name}/diagnostics")
+async def job_diagnostics(name: str) -> dict:
+    spec = jobs().get(name)
+    if not spec:
+        raise HTTPException(status_code=404, detail="Unknown job")
+    result = {"now": datetime.now(TZ).isoformat(), "job": job_summary(name, spec)}
+    notify = spec.get("notify")
+    if notify:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                response = await client.get(
+                    os.getenv("NOTIFICATION_SERVICE_URL", "http://notification-service:8083") + "/v1/routes"
+                )
+                response.raise_for_status()
+                routes = response.json().get("routes", {})
+                result["notification_route"] = {
+                    "route": notify.get("route"),
+                    **routes.get(notify.get("route"), {"configured": False}),
+                }
+        except Exception as exc:
+            result["notification_route"] = {"route": notify.get("route"), "configured": False, "error": str(exc)}
+    return result
 
 
 @app.patch("/v1/jobs/{name}")

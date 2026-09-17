@@ -222,7 +222,7 @@ services:
       - ./config:/config:ro
       - scheduler_data:/data
     expose: ["8082"]
-    depends_on: [paper-agent, planner-agent]
+    depends_on: [paper-agent, planner-agent, notification-service]
     restart: always
 
 volumes:

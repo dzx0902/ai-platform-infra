@@ -55,9 +55,21 @@ From the AstrBot Feishu bot:
 /paper_schedule off
 /paper_schedule on
 /paper_schedule run
+/paper_schedule doctor
 ```
 
 The `run` action triggers the same scheduler path as the daily cron job and sends the report through the Paper webhook route.
+
+If the daily push does not arrive, use `/paper_schedule doctor` first. On the server, inspect the same state with:
+
+```bash
+docker compose exec scheduler python - <<'PY'
+import httpx
+print(httpx.get("http://127.0.0.1:8082/v1/jobs/paper_daily/diagnostics", timeout=10).text)
+PY
+
+docker compose logs --tail=120 scheduler notification-service paper-agent
+```
 
 The legacy Finance Agent long-connection bot is disabled by default. Only start it when a separate interactive Finance bot is intentionally needed:
 
