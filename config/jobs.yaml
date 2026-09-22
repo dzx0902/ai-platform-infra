@@ -7,6 +7,12 @@ jobs:
     notify:
       route: paper
       field: message
+  paper_fulltext:
+    cron: "0 10 * * *"
+    method: POST
+    url: http://paper-agent:8010/api/paper/fulltext/run
+    timeout_seconds: 1800
+    body: {"limit": 3}
   planner_daily_review:
     cron: "0 22 * * *"
     method: POST

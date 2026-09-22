@@ -133,6 +133,10 @@ services:
       CONFIG_DIR: /app/config
       PAPER_RADAR_DATA_DIR: /data/papers
       PAPER_RADAR_NOTES_DIR: /data/notes
+      PAPER_RADAR_PDF_DIR: /data/pdfs
+      PAPER_RADAR_EXTRACTED_DIR: /data/extracted_texts
+      PAPER_RADAR_PAPER_NOTES_DIR: /data/notes/papers
+      PAPER_RADAR_OBSIDIAN_PAPER_NOTES_DIR: ""
       CHROMA_HOST: chromadb
       CHROMA_PORT: 8000
       AGENT_CORE_URL: http://agent-core:8080

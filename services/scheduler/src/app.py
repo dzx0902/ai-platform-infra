@@ -27,11 +27,18 @@ def config_path() -> Path:
 
 def load_config() -> dict[str, Any]:
     source = config_path()
+    template = Path(os.getenv("JOBS_TEMPLATE", "/config/jobs.yaml"))
+    defaults: dict[str, Any] = {}
+    if template.exists():
+        defaults = yaml.safe_load(template.read_text(encoding="utf-8")) or {}
     if not source.exists():
-        source = Path(os.getenv("JOBS_TEMPLATE", "/config/jobs.yaml"))
-    if not source.exists():
-        return {}
-    return yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+        return defaults
+    configured = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+    return {
+        **defaults,
+        **configured,
+        "jobs": {**defaults.get("jobs", {}), **configured.get("jobs", {})},
+    }
 
 
 def save_config(config: dict[str, Any]) -> None:
@@ -59,6 +66,7 @@ def job_summary(name: str, spec: dict[str, Any]) -> dict[str, Any]:
         "method": spec.get("method", "POST"),
         "url": spec.get("url"),
         "body": spec.get("body", {}),
+        "timeout_seconds": spec.get("timeout_seconds", 300),
         "notify": spec.get("notify"),
         "last_run": last_run.get(name),
         "last_attempt": state.get("last_attempt"),
@@ -121,7 +129,7 @@ async def invoke(name: str, spec: dict) -> dict:
         "last_error": None,
     }
     print(f"scheduler job started name={name}", flush=True)
-    async with httpx.AsyncClient(timeout=300) as client:
+    async with httpx.AsyncClient(timeout=spec.get("timeout_seconds", 300)) as client:
         try:
             response = await client.request(spec.get("method", "POST"), spec["url"], json=spec.get("body", {}))
             response.raise_for_status()
@@ -139,15 +147,17 @@ async def invoke(name: str, spec: dict) -> dict:
                     notification_payload = notification.json()
             finished_at = datetime.now(TZ).isoformat()
             last_run[name] = finished_at
+            partial = bool(payload.get("partial", False))
             job_state[name] = {
                 **job_state.get(name, {}),
-                "last_success": finished_at,
-                "last_status": "success",
-                "last_error": None,
+                "last_success": finished_at if not partial else job_state[name].get("last_success"),
+                "last_status": "partial" if partial else "success",
+                "last_error": "One or more items failed; inspect job result" if partial else None,
             }
-            print(f"scheduler job succeeded name={name}", flush=True)
+            print(f"scheduler job {'partial' if partial else 'succeeded'} name={name}", flush=True)
             return {
-                "ok": True,
+                "ok": not partial,
+                "partial": partial,
                 "name": name,
                 "status_code": response.status_code,
                 "notification": notification_payload,

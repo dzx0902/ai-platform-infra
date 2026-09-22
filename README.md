@@ -47,6 +47,10 @@ The scheduler routes Paper Radar daily reports to `paper` and Finance daily repo
 
 Paper Radar's daily schedule is defined by `paper_daily` in `config/jobs.yaml` and defaults to 08:00 Asia/Shanghai. At runtime, the scheduler reads the template from `config/jobs.yaml` and writes user changes to the `scheduler_data` Docker volume, so Feishu schedule changes do not dirty the Git checkout.
 
+`paper_fulltext` runs separately at 10:00 Asia/Shanghai. It downloads and extracts up to three high-scoring PDFs, creates full-paper notes in the `paper_data` volume, and sends Markdown to knowledge-sync. New template jobs are merged into existing scheduler settings; user-edited schedules remain intact. Check its status with `GET /v1/jobs/paper_fulltext/diagnostics` inside the scheduler container. A `partial` status means at least one PDF or summary failed.
+
+The API default for DeepSeek is `deepseek-flash`. Existing production `.env` files are ignored by Git, so update `DEEPSEEK_MODEL=deepseek-flash` on the server before recreating `agent-core`, `paper-agent`, `planner-agent`, and any enabled Finance services. AstrBot model providers saved in its UI must be updated there separately.
+
 From the AstrBot Feishu bot:
 
 ```text
